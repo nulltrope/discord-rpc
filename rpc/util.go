@@ -1,11 +1,11 @@
-package util
+package rpc
 
 import (
 	"crypto/rand"
 	"fmt"
 )
 
-// GenNonce creates a pseudorandom string to be included in payloads
+// GenNonce creates a pseudorandom string to be included in payloads.
 func GenNonce() (string, error) {
 	buf := make([]byte, 16)
 	_, err := rand.Read(buf)

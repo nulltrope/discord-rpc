@@ -4,7 +4,7 @@ package transport
 
 const unixSocketBaseAddress = `discord-ipc`
 
-// helper for fetching temp dir on various systems
+// getTempDir is a helper function for finding the appropriate temp directory on unix systems.
 func getTempDir() string {
 	tempDir := "/tmp"
 	for _, envVar := range []string{"XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"} {
@@ -16,7 +16,7 @@ func getTempDir() string {
 	return tempDir
 }
 
-// open numbered discord socket on unix-like systems with timeout
+// openSocket will open a numbered discord socket on unix-like systems with timeout.
 func openSocket(number int, timeout time.Duration) (net.Conn, error) {
 	return net.DialTimeout(
 		"unix", 

@@ -1,3 +1,4 @@
+// Package client provides implementations for interacting with a Discord client over RPC.
 package client
 
 import (
@@ -10,7 +11,6 @@ import (
 
 	"github.com/nulltrope/discord-rpc/rpc"
 	"github.com/nulltrope/discord-rpc/transport"
-	"github.com/nulltrope/discord-rpc/util"
 )
 
 const (
@@ -19,10 +19,11 @@ const (
 )
 
 var (
+	// DefaultOAuthScopes is the minimal scope(s) required for most RPC actions.
 	DefaultOAuthScopes = []string{"rpc"}
 )
 
-// OAuthInfo stores the OAuth token response
+// OAuthInfo stores the OAuth token response.
 type OAuthInfo struct {
 	AccessToken  string `json:"access_token"`
 	TokenType    string `json:"token_type"`
@@ -31,28 +32,39 @@ type OAuthInfo struct {
 	Scope        string `json:"scope"`
 }
 
-// OAuthClient is an RPC client capable of performing the OAuth login flow
+// OAuthClient is a Discord RPC client capable of performing the OAuth login flow.
 type OAuthClient struct {
-	ClientId     string
+	// ClientId is the ID of the Discord application you are authenticating on behalf of.
+	ClientId string
+	// ClientSecret is the ID of the Discord application you are authenticating on behalf of.
 	ClientSecret string
-	Scopes       []string
+	// Scopes are the OAuth scopes you are logging in with.
+	// See https://discord.com/developers/docs/topics/oauth2#shared-resources-oauth2-scopes.
+	Scopes []string
+	// TokenAddress is the Discord API endpoint used to retrieve an access token.
 	TokenAddress string
-	RedirectURI  string
-	AuthInfo     *OAuthInfo
-	HTTPClient   *http.Client
-	Transport    Transport
+	// RedirectURI is the local URI used to complete the OAuth flow.
+	RedirectURI string
+	// AuthInfo will hold the OAuth info if the client has already authenticated.
+	// Additionally, if you perform the OAuth flow yourself, you can pass the info in here
+	// to skip the client performing the login flow for you.
+	AuthInfo *OAuthInfo
+	// HTTPClient is the http client used to perform the OAuth login flow.
+	// If nil, http.DefaultClient is used.
+	HTTPClient *http.Client
+	// Transport is the underlying transport used to communicate with the Discord client.
+	// If nil, transport.DefaultIPC is used.
+	Transport Transport
 }
 
+// Transport is an interface representing the ability to read/write data to some place.
 type Transport interface {
 	Connect(string) error
 	Write([]byte) error
 	Read() ([]byte, error)
 }
 
-// NewOAuthClient creates a new rpc client capable of performing the OAuth login flow
-// If you wish to customize settings beyond this functions arguments, it's recommended
-// you call this function first, then override the struct's fields to ensure mandatory
-// fields exist/avoid exceptions.
+// NewOAuthClient creates a new rpc client capable of performing the OAuth login flow.
 func NewOAuthClient(clientId, clientSecret string, scopes []string) *OAuthClient {
 	return &OAuthClient{
 		ClientId:     clientId,
@@ -61,7 +73,7 @@ func NewOAuthClient(clientId, clientSecret string, scopes []string) *OAuthClient
 		TokenAddress: defaultOAuthTokenAddress,
 		RedirectURI:  defaultOAuthRedirectUri,
 		AuthInfo:     nil,
-		HTTPClient:   &http.Client{},
+		HTTPClient:   http.DefaultClient,
 		Transport:    transport.DefaultIPC,
 	}
 }
@@ -94,30 +106,35 @@ func (c *OAuthClient) redirectURI() string {
 	return c.RedirectURI
 }
 
-// Args for the Authorize command request payload
-// https://discord.com/developers/docs/topics/rpc#authenticate-authenticate-argument-structure
+// Args for the Authorize command request payload.
+// See https://discord.com/developers/docs/topics/rpc#authorize-authorize-argument-structure.
 type authorizeCmdArgs struct {
 	ClientId string   `json:"client_id"`
 	Scopes   []string `json:"scopes"`
 }
 
-// Data for the Authorize command response payload
-// https://discord.com/developers/docs/topics/rpc#authorize-example-authorize-response-payload
+// Data for the Authorize command response payload.
+// See https://discord.com/developers/docs/topics/rpc#authorize-authorize-response-structure.
 type authorizeCmdData struct {
 	Code string `json:"code"`
 }
 
+// Args for the Authenticate command request payload.
+// See https://discord.com/developers/docs/topics/rpc#authenticate-authenticate-argument-structure.
 type authenticateCmdArgs struct {
 	AccessToken string `json:"access_token"`
 }
 
+// Data for the Authenticate command response payload.
+// See https://discord.com/developers/docs/topics/rpc#authenticate-authenticate-response-structure.
 type authenticateCmdData struct {
 	Scopes  []string `json:"scopes"`
 	Expires string   `json:"expires"`
 	// Excluding additional fields which we don't care about
 }
 
-// Login will initiate the OAuth flow over the given transport
+// Login will initiate the OAuth flow over the given transport.
+// Additionally, the transport will be initialized/connected if not already done.
 func (c *OAuthClient) Login() error {
 	// Ensure we're connected
 	connectErr := c.transport().Connect(c.ClientId)
@@ -130,6 +147,7 @@ func (c *OAuthClient) Login() error {
 		return c.doLogin()
 	} else {
 		// Either we already logged in or somebody provided auth info
+		// [TODO]: Support "half" flow, e.g. we have a valid refresh token
 		_, err := c.authenticate(c.AuthInfo.AccessToken)
 		if err != nil {
 			return fmt.Errorf("error sending authenticate request: %v", err)
@@ -263,10 +281,11 @@ func (c *OAuthClient) authenticate(token string) (*authenticateCmdData, error) {
 	return &payloadData, nil
 }
 
-// Send a payload over transport
+// Send will send an rpc.Payload over the transport.
+// If payload.Nonce is not defined, a new Nonce will be generated.
 func (c *OAuthClient) Send(payload *rpc.Payload) error {
 	if payload.Nonce == "" {
-		nonce, nonceErr := util.GenNonce()
+		nonce, nonceErr := rpc.GenNonce()
 		if nonceErr != nil {
 			return nonceErr
 		}
@@ -281,7 +300,7 @@ func (c *OAuthClient) Send(payload *rpc.Payload) error {
 	return c.transport().Write(data)
 }
 
-// Receive a payload over transport, doing basic error checking
+// Receive will read an rpc.Payload from the transport, returning an error if the payload event type is ERROR.
 func (c *OAuthClient) Receive() (*rpc.Payload, error) {
 	data, err := c.transport().Read()
 	if err != nil {
