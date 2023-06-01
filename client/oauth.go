@@ -62,6 +62,7 @@ type Transport interface {
 	Connect(string) error
 	Write([]byte) error
 	Read() ([]byte, error)
+	Close() error
 }
 
 // NewOAuthClient creates a new rpc client capable of performing the OAuth login flow.

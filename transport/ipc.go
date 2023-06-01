@@ -191,7 +191,7 @@ func (s *IPC) Read() ([]byte, error) {
 // ReadOp reads data from the IPC socket and returns the OpCode.
 func (s *IPC) ReadOp() (OpCode, []byte, error) {
 	if s.conn == nil {
-		return OpError, nil, errors.New("ipc: connection not yet established")
+		return OpClose, nil, errors.New("ipc: connection not yet established")
 	}
 
 	var opCodeBuf bytes.Buffer
@@ -229,4 +229,10 @@ func (s *IPC) ReadOp() (OpCode, []byte, error) {
 	}
 
 	return opCode, dataBuf, nil
+}
+
+func (s *IPC) Close() error {
+	err := s.conn.Close()
+	s.conn = nil
+	return err
 }
