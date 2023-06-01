@@ -183,7 +183,7 @@ func (s *IPC) WriteOp(opCode OpCode, data []byte) error {
 func (s *IPC) Read() ([]byte, error) {
 	opCode, data, err := s.ReadOp()
 	if opCode != OpFrame {
-		return data, fmt.Errorf("ipc: unexpected OpCode received: %d", opCode)
+		return data, fmt.Errorf("ipc: unexpected OpCode received: %d: %v", opCode, err)
 	}
 	return data, err
 }
