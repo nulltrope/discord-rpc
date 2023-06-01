@@ -59,7 +59,7 @@ type OAuthClient struct {
 
 // Transport is an interface representing the ability to read/write data to some place.
 type Transport interface {
-	Connect(string) error
+	Connect(string) (*rpc.Payload, error)
 	Write([]byte) error
 	Read() ([]byte, error)
 	Close() error
@@ -136,25 +136,28 @@ type authenticateCmdData struct {
 
 // Login will initiate the OAuth flow over the given transport.
 // Additionally, the transport will be initialized/connected if not already done.
-func (c *OAuthClient) Login() error {
+func (c *OAuthClient) Login() (*rpc.Payload, error) {
 	// Ensure we're connected
-	connectErr := c.transport().Connect(c.ClientId)
+	connectPayload, connectErr := c.transport().Connect(c.ClientId)
 	if connectErr != nil {
-		return connectErr
+		return nil, connectErr
 	}
 
 	if c.AuthInfo == nil {
 		// We've never logged in before, do full flow
-		return c.doLogin()
+		if loginErr := c.doLogin(); loginErr != nil {
+			return nil, loginErr
+		}
+
 	} else {
 		// Either we already logged in or somebody provided auth info
 		// [TODO]: Support "half" flow, e.g. we have a valid refresh token
 		_, err := c.authenticate(c.AuthInfo.AccessToken)
 		if err != nil {
-			return fmt.Errorf("error sending authenticate request: %v", err)
+			return nil, fmt.Errorf("error sending authenticate request: %v", err)
 		}
 	}
-	return nil
+	return connectPayload, nil
 }
 
 func (c *OAuthClient) doLogin() error {

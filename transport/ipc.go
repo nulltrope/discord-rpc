@@ -32,7 +32,7 @@ const (
 )
 
 var (
-	ErrClosed = errors.New("connection closed")
+	ErrConnClosed = errors.New("connection closed")
 
 	defaultIPCSocketTimeout   = time.Second * 2
 	defaultIPCSocketBindRange = 10
@@ -69,20 +69,21 @@ func (s *IPC) bindTimeout() time.Duration {
 
 // Connect will try and bind to the first available Discord client's IPC socket
 // and send the initial handshake payload.
-func (t *IPC) Connect(clientId string) error {
+func (t *IPC) Connect(clientId string) (*rpc.Payload, error) {
 	// Check if we're already connected
 	if t.conn != nil {
-		return nil
+		return nil, nil
 	}
 
 	err := t.tryBind()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err = t.handshake(clientId); err != nil {
-		return fmt.Errorf("error making handshake: %v", err)
+	payload, err := t.handshake(clientId)
+	if err != nil {
+		return nil, fmt.Errorf("error making handshake: %v", err)
 	}
-	return nil
+	return payload, nil
 }
 
 func (s *IPC) tryBind() error {
@@ -102,47 +103,47 @@ type handshake struct {
 	ClientId string `json:"client_id"`
 }
 
-func (s *IPC) handshake(clientId string) error {
+func (s *IPC) handshake(clientId string) (*rpc.Payload, error) {
 	payload, err := json.Marshal(handshake{"1", clientId})
 	if err != nil {
-		return fmt.Errorf("error marshalling handshake data: %w", err)
+		return nil, fmt.Errorf("error marshalling handshake data: %w", err)
 	}
 
 	err = s.WriteOp(OpHandshake, payload)
 	if err != nil {
-		return fmt.Errorf("error writing handshake data to conn: %w", err)
+		return nil, fmt.Errorf("error writing handshake data to conn: %w", err)
 	}
 
 	opCode, respRaw, err := s.ReadOp()
 	if err != nil {
-		return fmt.Errorf("error reading handshake data from conn: %w", err)
+		return nil, fmt.Errorf("error reading handshake data from conn: %w", err)
 	}
 
 	if opCode == OpClose {
 		var closeData rpc.ErrorEvtData
 		err = json.Unmarshal(respRaw, &closeData)
 		if err != nil {
-			return fmt.Errorf("received close op code but couldn't unmarshall data: %v", err)
+			return nil, fmt.Errorf("received close op code but couldn't unmarshall data: %v", err)
 		}
-		return fmt.Errorf("transport closed: code=%d, message=%s", closeData.Code, closeData.Message)
+		return nil, fmt.Errorf("transport closed: code=%d, message=%s", closeData.Code, closeData.Message)
 	}
 
 	var respPayload rpc.Payload
 	err = json.Unmarshal(respRaw, &respPayload)
 	if err != nil {
-		return fmt.Errorf("error unmarshalling handshake response data: %v", err)
+		return nil, fmt.Errorf("error unmarshalling handshake response data: %v", err)
 	}
 
 	payloadErr := respPayload.Error()
 	if payloadErr != nil {
-		return fmt.Errorf("received error payload: %v", payloadErr)
+		return nil, fmt.Errorf("received error payload: %v", payloadErr)
 	}
 
 	if respPayload.Evt != "READY" {
-		return fmt.Errorf("expected READY event, got %s", respPayload.Evt)
+		return nil, fmt.Errorf("expected READY event, got %s", respPayload.Evt)
 	}
 
-	return nil
+	return &respPayload, nil
 }
 
 // Write sends data to the IPC socket with the FRAME OpCode.
@@ -153,13 +154,13 @@ func (s *IPC) Write(data []byte) error {
 // WriteOp sends data to the IPC socket with the given OpCode.
 func (s *IPC) WriteOp(opCode OpCode, data []byte) error {
 	if s.conn == nil {
-		return errors.New("connection not yet established")
+		return ErrConnClosed
 	}
 
 	var buf bytes.Buffer
 	err := binary.Write(&buf, binary.LittleEndian, int32(opCode))
 	if err != nil {
-		return fmt.Errorf("error writing opcode to buffer: %w", err)
+		return fmt.Errorf("error writing opcode to buffer: %v", err)
 	}
 
 	err = binary.Write(&buf, binary.LittleEndian, int32(len(data)))
@@ -174,7 +175,10 @@ func (s *IPC) WriteOp(opCode OpCode, data []byte) error {
 
 	_, err = s.conn.Write(buf.Bytes())
 	if err != nil {
-		return fmt.Errorf("error writing buffer to socket: %w", err)
+		if errors.Is(err, io.EOF) {
+			return ErrConnClosed
+		}
+		return fmt.Errorf("error writing buffer to socket: %v", err)
 	}
 
 	return nil
@@ -185,7 +189,7 @@ func (s *IPC) WriteOp(opCode OpCode, data []byte) error {
 func (s *IPC) Read() ([]byte, error) {
 	opCode, data, err := s.ReadOp()
 	if opCode != OpFrame {
-		return data, fmt.Errorf("unexpected OpCode received: %d: %v", opCode, err)
+		return data, fmt.Errorf("unexpected OpCode received: opCode=%d, err=%w", opCode, err)
 	}
 	return data, err
 }
@@ -193,14 +197,14 @@ func (s *IPC) Read() ([]byte, error) {
 // ReadOp reads data from the IPC socket and returns the OpCode.
 func (s *IPC) ReadOp() (OpCode, []byte, error) {
 	if s.conn == nil {
-		return OpClose, nil, errors.New("connection not yet established")
+		return OpClose, nil, ErrConnClosed
 	}
 
 	var opCodeBuf bytes.Buffer
 	_, err := io.CopyN(&opCodeBuf, s.conn, 4)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			return OpClose, nil, errors.New("connection closed")
+			return OpClose, nil, ErrConnClosed
 		}
 		return OpError, nil, fmt.Errorf("error reading OpCode from conn: %v", err)
 	}
@@ -208,9 +212,6 @@ func (s *IPC) ReadOp() (OpCode, []byte, error) {
 	var opCode OpCode
 	err = binary.Read(&opCodeBuf, binary.LittleEndian, &opCode)
 	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return OpClose, nil, errors.New("connection closed")
-		}
 		return OpError, nil, fmt.Errorf("error parsing OpCode bytes: %v", err)
 	}
 
@@ -218,7 +219,7 @@ func (s *IPC) ReadOp() (OpCode, []byte, error) {
 	_, err = io.CopyN(&dataSizeBuf, s.conn, 4)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			return OpClose, nil, errors.New("connection closed")
+			return OpClose, nil, ErrConnClosed
 		}
 		return OpError, nil, fmt.Errorf("error reading data size from conn: %v", err)
 	}
@@ -226,9 +227,6 @@ func (s *IPC) ReadOp() (OpCode, []byte, error) {
 	var dataSize int32
 	err = binary.Read(&dataSizeBuf, binary.LittleEndian, &dataSize)
 	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return OpClose, nil, errors.New("connection closed")
-		}
 		return OpError, nil, fmt.Errorf("error parsing data size bytes: %v", err)
 	}
 
@@ -236,7 +234,7 @@ func (s *IPC) ReadOp() (OpCode, []byte, error) {
 	dataRead, err := s.conn.Read(dataBuf)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			return OpClose, nil, errors.New("connection closed")
+			return OpClose, nil, ErrConnClosed
 		}
 		return OpError, nil, fmt.Errorf("error reading payload data from conn: %v", err)
 	}

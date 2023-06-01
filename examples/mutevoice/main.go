@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"os"
 
@@ -15,9 +16,16 @@ type muteCmdArgs struct {
 func main() {
 	client := client.NewOAuthClient(os.Getenv("DISCORD_CLIENT_ID"), os.Getenv("DISCORD_CLIENT_SECRET"), client.DefaultOAuthScopes)
 
-	err := client.Login()
+	payload, err := client.Login()
 	if err != nil {
 		log.Fatalln(err)
+	}
+
+	if payload.Evt == "READY" {
+		var readyData rpc.ReadyEvtData
+		if err := json.Unmarshal(*payload.RawData, &readyData); err == nil {
+			log.Printf("Logged in with user: id='%s', name='%s'", readyData.User.Id, readyData.User.Username)
+		}
 	}
 
 	muteCmd := &rpc.Payload{

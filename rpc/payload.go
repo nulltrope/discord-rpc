@@ -34,6 +34,26 @@ type ErrorEvtData struct {
 	Message string `json:"message"`
 }
 
+type readyEvtDataConfig struct {
+	CdnHost     string `json:"cdn_host"`
+	ApiEndpoint string `json:"api_endpoint"`
+	Environment string `json:"environment"`
+}
+
+type readyEvtDataUser struct {
+	Id       string `json:"id"`
+	Username string `json:"username"`
+	// Excluding optional info we don't care about
+}
+
+// ReadyEvtData is received for READY payloads.
+// See https://discord.com/developers/docs/topics/rpc#ready.
+type ReadyEvtData struct {
+	V      int                `json:"v"`
+	Config readyEvtDataConfig `json:"config"`
+	User   readyEvtDataUser   `json:"user"`
+}
+
 // UnmarshalJSON is a custom unmarshaller for Payloads that will populate ErrorData if the Evt is ERROR.
 func (p *Payload) UnmarshalJSON(data []byte) error {
 	// Type alias prevents infinite unmarshal loop
