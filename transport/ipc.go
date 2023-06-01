@@ -32,6 +32,8 @@ const (
 )
 
 var (
+	ErrClosed = errors.New("connection closed")
+
 	defaultIPCSocketTimeout   = time.Second * 2
 	defaultIPCSocketBindRange = 10
 )
@@ -78,7 +80,7 @@ func (t *IPC) Connect(clientId string) error {
 		return err
 	}
 	if err = t.handshake(clientId); err != nil {
-		return fmt.Errorf("ipc: error making handshake: %v", err)
+		return fmt.Errorf("error making handshake: %v", err)
 	}
 	return nil
 }
@@ -103,17 +105,17 @@ type handshake struct {
 func (s *IPC) handshake(clientId string) error {
 	payload, err := json.Marshal(handshake{"1", clientId})
 	if err != nil {
-		return fmt.Errorf("error marshalling handshake data: %v", err)
+		return fmt.Errorf("error marshalling handshake data: %w", err)
 	}
 
 	err = s.WriteOp(OpHandshake, payload)
 	if err != nil {
-		return fmt.Errorf("error writing handshake data to conn: %v", err)
+		return fmt.Errorf("error writing handshake data to conn: %w", err)
 	}
 
 	opCode, respRaw, err := s.ReadOp()
 	if err != nil {
-		return fmt.Errorf("error reading handshake data from conn: %v", err)
+		return fmt.Errorf("error reading handshake data from conn: %w", err)
 	}
 
 	if opCode == OpClose {
@@ -151,28 +153,28 @@ func (s *IPC) Write(data []byte) error {
 // WriteOp sends data to the IPC socket with the given OpCode.
 func (s *IPC) WriteOp(opCode OpCode, data []byte) error {
 	if s.conn == nil {
-		return errors.New("ipc: connection not yet established")
+		return errors.New("connection not yet established")
 	}
 
 	var buf bytes.Buffer
 	err := binary.Write(&buf, binary.LittleEndian, int32(opCode))
 	if err != nil {
-		return fmt.Errorf("ipc: error writing opcode to buffer: %v", err)
+		return fmt.Errorf("error writing opcode to buffer: %w", err)
 	}
 
 	err = binary.Write(&buf, binary.LittleEndian, int32(len(data)))
 	if err != nil {
-		return fmt.Errorf("ipc: error writing payload length to buffer: %v", err)
+		return fmt.Errorf("error writing payload length to buffer: %v", err)
 	}
 
 	_, err = buf.Write(data)
 	if err != nil {
-		return fmt.Errorf("ipc: error writing payload to buffer: %v", err)
+		return fmt.Errorf("error writing payload to buffer: %v", err)
 	}
 
 	_, err = s.conn.Write(buf.Bytes())
 	if err != nil {
-		return fmt.Errorf("ipc: error writing buffer to socket: %v", err)
+		return fmt.Errorf("error writing buffer to socket: %w", err)
 	}
 
 	return nil
@@ -183,7 +185,7 @@ func (s *IPC) WriteOp(opCode OpCode, data []byte) error {
 func (s *IPC) Read() ([]byte, error) {
 	opCode, data, err := s.ReadOp()
 	if opCode != OpFrame {
-		return data, fmt.Errorf("ipc: unexpected OpCode received: %d: %v", opCode, err)
+		return data, fmt.Errorf("unexpected OpCode received: %d: %v", opCode, err)
 	}
 	return data, err
 }
@@ -191,41 +193,56 @@ func (s *IPC) Read() ([]byte, error) {
 // ReadOp reads data from the IPC socket and returns the OpCode.
 func (s *IPC) ReadOp() (OpCode, []byte, error) {
 	if s.conn == nil {
-		return OpClose, nil, errors.New("ipc: connection not yet established")
+		return OpClose, nil, errors.New("connection not yet established")
 	}
 
 	var opCodeBuf bytes.Buffer
 	_, err := io.CopyN(&opCodeBuf, s.conn, 4)
 	if err != nil {
-		return OpError, nil, fmt.Errorf("ipc: error reading OpCode from conn: %v", err)
+		if errors.Is(err, io.EOF) {
+			return OpClose, nil, errors.New("connection closed")
+		}
+		return OpError, nil, fmt.Errorf("error reading OpCode from conn: %v", err)
 	}
 
 	var opCode OpCode
 	err = binary.Read(&opCodeBuf, binary.LittleEndian, &opCode)
 	if err != nil {
-		return OpError, nil, fmt.Errorf("ipc: error parsing OpCode bytes: %v", err)
+		if errors.Is(err, io.EOF) {
+			return OpClose, nil, errors.New("connection closed")
+		}
+		return OpError, nil, fmt.Errorf("error parsing OpCode bytes: %v", err)
 	}
 
 	var dataSizeBuf bytes.Buffer
 	_, err = io.CopyN(&dataSizeBuf, s.conn, 4)
 	if err != nil {
-		return OpError, nil, fmt.Errorf("ipc: error reading data size from conn: %v", err)
+		if errors.Is(err, io.EOF) {
+			return OpClose, nil, errors.New("connection closed")
+		}
+		return OpError, nil, fmt.Errorf("error reading data size from conn: %v", err)
 	}
 
 	var dataSize int32
 	err = binary.Read(&dataSizeBuf, binary.LittleEndian, &dataSize)
 	if err != nil {
-		return OpError, nil, fmt.Errorf("ipc: error parsing data size bytes: %v", err)
+		if errors.Is(err, io.EOF) {
+			return OpClose, nil, errors.New("connection closed")
+		}
+		return OpError, nil, fmt.Errorf("error parsing data size bytes: %v", err)
 	}
 
 	dataBuf := make([]byte, dataSize)
 	dataRead, err := s.conn.Read(dataBuf)
 	if err != nil {
-		return OpError, nil, fmt.Errorf("ipc: error reading payload data from conn: %v", err)
+		if errors.Is(err, io.EOF) {
+			return OpClose, nil, errors.New("connection closed")
+		}
+		return OpError, nil, fmt.Errorf("error reading payload data from conn: %v", err)
 	}
 
 	if int32(dataRead) != dataSize {
-		return OpError, nil, fmt.Errorf("ipc: expected %d payload bytes, got %d", dataSize, dataRead)
+		return OpError, nil, fmt.Errorf("expected %d payload bytes, got %d", dataSize, dataRead)
 	}
 
 	return opCode, dataBuf, nil
