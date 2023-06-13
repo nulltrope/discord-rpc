@@ -281,10 +281,6 @@ func (c *OAuthClient) authorize(app OAuthApp) (*authorizeCmdData, error) {
 		return nil, fmt.Errorf("expected AUTHORIZE cmd but got %s", payload.Cmd)
 	}
 
-	if err = payload.Error(); err != nil {
-		return nil, fmt.Errorf("got error payload: %v", err)
-	}
-
 	var payloadData authorizeCmdData
 	err = json.Unmarshal(*payload.RawData, &payloadData)
 	if err != nil {
@@ -356,10 +352,6 @@ func (c *OAuthClient) authenticate(token string) (*authenticateCmdData, error) {
 
 	if payload.Cmd != "AUTHENTICATE" {
 		return nil, fmt.Errorf("expected AUTHENTICATE cmd but got %s", payload.Cmd)
-	}
-
-	if err = payload.Error(); err != nil {
-		return nil, fmt.Errorf("got error payload: %v", err)
 	}
 
 	var payloadData authenticateCmdData
