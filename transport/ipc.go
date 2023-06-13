@@ -69,6 +69,7 @@ func (s *IPC) bindTimeout() time.Duration {
 
 // Connect will try and bind to the first available Discord client's IPC socket
 // and send the initial handshake payload.
+// Returns the READY payload, or an error.
 func (t *IPC) Connect(clientId string) (*rpc.Payload, error) {
 	// Check if we're already connected
 	if t.conn != nil {
@@ -83,6 +84,11 @@ func (t *IPC) Connect(clientId string) (*rpc.Payload, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error making handshake: %v", err)
 	}
+
+	if payload.Evt != "READY" {
+		return payload, fmt.Errorf("expected ready event, got: %s", payload.Evt)
+	}
+
 	return payload, nil
 }
 

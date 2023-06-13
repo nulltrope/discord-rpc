@@ -3,6 +3,7 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -65,7 +66,7 @@ func (p *Payload) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	if payload.Evt == "ERROR" {
+	if p.Evt == "ERROR" {
 		var errData ErrorEvtData
 		err = json.Unmarshal(*p.RawData, &errData)
 		if err != nil {
@@ -82,6 +83,8 @@ func (p *Payload) UnmarshalJSON(data []byte) error {
 func (p *Payload) Error() error {
 	if p.ErrorData != nil {
 		return fmt.Errorf("code:%d, message:%s", p.ErrorData.Code, p.ErrorData.Message)
+	} else if p.Evt == "ERROR" {
+		return errors.New("unknown")
 	}
 	return nil
 }

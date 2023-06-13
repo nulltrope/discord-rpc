@@ -3,6 +3,7 @@ package client
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,8 +24,8 @@ var (
 	DefaultOAuthScopes = []string{"rpc"}
 )
 
-// OAuthInfo stores the OAuth token response.
-type OAuthInfo struct {
+// OAuthToken stores the OAuth token response.
+type OAuthToken struct {
 	AccessToken  string `json:"access_token"`
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int    `json:"expires_in"`
@@ -32,23 +33,40 @@ type OAuthInfo struct {
 	Scope        string `json:"scope"`
 }
 
+// OAuthApp stores the discord application credentials tied to a specific user account
+type OAuthApp struct {
+	// ClientId is the ID of the Discord application you are authenticating on behalf of.
+	ClientId string `json:"client_id"`
+	// ClientSecret is the ID of the Discord application you are authenticating on behalf of.
+	ClientSecret string `json:"client_secret"`
+	// Token holds the token info for this application, if its already been authenticated
+	// If you perform the OAuth flow yourself, you can pass the info in here
+	// to skip the client performing the login flow for you.
+	Token *OAuthToken `json:"token,omitempty"`
+}
+
+type UserID string
+
+const UserIDAny = "*"
+
+type OAuthApps map[UserID]OAuthApp
+
 // OAuthClient is a Discord RPC client capable of performing the OAuth login flow.
 type OAuthClient struct {
-	// ClientId is the ID of the Discord application you are authenticating on behalf of.
-	ClientId string
-	// ClientSecret is the ID of the Discord application you are authenticating on behalf of.
-	ClientSecret string
-	// Scopes are the OAuth scopes you are logging in with.
-	// See https://discord.com/developers/docs/topics/oauth2#shared-resources-oauth2-scopes.
-	Scopes []string
 	// TokenAddress is the Discord API endpoint used to retrieve an access token.
 	TokenAddress string
 	// RedirectURI is the local URI used to complete the OAuth flow.
 	RedirectURI string
-	// AuthInfo will hold the OAuth info if the client has already authenticated.
-	// Additionally, if you perform the OAuth flow yourself, you can pass the info in here
-	// to skip the client performing the login flow for you.
-	AuthInfo *OAuthInfo
+	// Scopes are the OAuth scopes you are logging in with.
+	// See https://discord.com/developers/docs/topics/oauth2#shared-resources-oauth2-scopes.
+	Scopes []string
+	// Apps holds the auth info for multiple Discord applications, keyed by User ID.
+	// This is needed because Discord only allows RPC from Applications owned by the currently logged-in user.
+	// If you plan to switch accounts in your Discord client, you'll need to store the Discord application info
+	// for each user account you plan to switch to.
+	// If you only plan to use a single user account in your Discord client, you can just key by UserIDAny to not
+	// require inputting your user ID in this config.
+	Apps OAuthApps
 	// HTTPClient is the http client used to perform the OAuth login flow.
 	// If nil, http.DefaultClient is used.
 	HTTPClient *http.Client
@@ -67,13 +85,27 @@ type Transport interface {
 
 // NewOAuthClient creates a new rpc client capable of performing the OAuth login flow.
 func NewOAuthClient(clientId, clientSecret string, scopes []string) *OAuthClient {
-	return &OAuthClient{
+	apps := make(OAuthApps)
+	apps[UserIDAny] = OAuthApp{
 		ClientId:     clientId,
 		ClientSecret: clientSecret,
-		Scopes:       scopes,
+	}
+	return &OAuthClient{
 		TokenAddress: defaultOAuthTokenAddress,
 		RedirectURI:  defaultOAuthRedirectUri,
-		AuthInfo:     nil,
+		Scopes:       scopes,
+		Apps:         apps,
+		HTTPClient:   http.DefaultClient,
+		Transport:    transport.DefaultIPC,
+	}
+}
+
+func NewMultiAccountOAuthClient(apps OAuthApps, scopes []string) *OAuthClient {
+	return &OAuthClient{
+		TokenAddress: defaultOAuthTokenAddress,
+		RedirectURI:  defaultOAuthRedirectUri,
+		Scopes:       scopes,
+		Apps:         apps,
 		HTTPClient:   http.DefaultClient,
 		Transport:    transport.DefaultIPC,
 	}
@@ -137,53 +169,99 @@ type authenticateCmdData struct {
 // Login will initiate the OAuth flow over the given transport.
 // Additionally, the transport will be initialized/connected if not already done.
 func (c *OAuthClient) Login() (*rpc.Payload, error) {
-	// Ensure we're connected
-	connectPayload, connectErr := c.transport().Connect(c.ClientId)
-	if connectErr != nil {
-		return nil, connectErr
+	if c.Apps == nil || len(c.Apps) < 1 {
+		return nil, errors.New("must specify at least one OAuthApp")
 	}
 
-	if c.AuthInfo == nil {
-		// We've never logged in before, do full flow
-		if loginErr := c.doLogin(); loginErr != nil {
-			return nil, loginErr
-		}
+	// We can just use the first app for the initial handshake
+	var handshakeApp OAuthApp
+	for _, app := range c.Apps {
+		handshakeApp = app
+		break
+	}
 
+	// Make initial connection to get info on the current user
+	connectPayload, err := c.transport().Connect(handshakeApp.ClientId)
+	if err != nil {
+		return connectPayload, fmt.Errorf("initial connect handshake with clientId '%s' failed: %v", handshakeApp.ClientId, err)
+	}
+
+	var readyEvtData rpc.ReadyEvtData
+	err = json.Unmarshal(*connectPayload.RawData, &readyEvtData)
+	if err != nil {
+		return connectPayload, err
+	}
+
+	// Now we know the current user, get the proper App info for the actual OAuth flow
+	var app OAuthApp
+	if ourUser, ok := c.Apps[UserID(readyEvtData.User.Id)]; ok {
+		// Exact match takes priority
+		app = ourUser
+	} else if anyUser, ok := c.Apps[UserIDAny]; ok {
+		// Else try wildcard ANY login
+		app = anyUser
 	} else {
-		// Either we already logged in or somebody provided auth info
-		// [TODO]: Support "half" flow, e.g. we have a valid refresh token
-		_, err := c.authenticate(c.AuthInfo.AccessToken)
+		// We have nothing, sad
+		return connectPayload, fmt.Errorf("unable to find app for user: %s", readyEvtData.User.Id)
+	}
+
+	if app.ClientId != handshakeApp.ClientId {
+		// We need to disconnect & re-connect
+		err = c.transport().Close()
 		if err != nil {
-			return nil, fmt.Errorf("error sending authenticate request: %v", err)
+			return connectPayload, fmt.Errorf("unable to close initian conn: %v", err)
+		}
+
+		connectPayload, err := c.transport().Connect(app.ClientId)
+		if err != nil {
+			return connectPayload, fmt.Errorf("app connect handshake with clientId '%s' failed: %v", app.ClientId, err)
 		}
 	}
+
+	// Check if we have previous login info or need to perform full flow
+	if app.Token != nil {
+		_, err := c.authenticate(app.Token.AccessToken)
+		if err != nil {
+			return nil, fmt.Errorf("authentication failed: %v", err)
+		}
+		return connectPayload, nil
+	}
+
+	// We've never logged in before, do full flow
+	authInfo, err := c.doLogin(app)
+	if err != nil {
+		return connectPayload, err
+	}
+
+	// Save auth info for next time
+	app.Token = authInfo
+	c.Apps[UserID(readyEvtData.User.Id)] = app
 	return connectPayload, nil
 }
 
-func (c *OAuthClient) doLogin() error {
-	authzData, err := c.authorize()
+func (c *OAuthClient) doLogin(app OAuthApp) (*OAuthToken, error) {
+	authzData, err := c.authorize(app)
 	if err != nil {
-		return fmt.Errorf("error sending authorize request: %v", err)
+		return nil, fmt.Errorf("authorization failed: %v", err)
 	}
 
-	authInfo, err := c.getToken(authzData.Code)
+	authInfo, err := c.getToken(app, authzData.Code)
 	if err != nil {
-		return fmt.Errorf("error exchanging code for token: %v", err)
+		return authInfo, fmt.Errorf("token exchange failed: %v", err)
 	}
 
 	_, err = c.authenticate(authInfo.AccessToken)
 	if err != nil {
-		return fmt.Errorf("error sending authenticate request: %v", err)
+		return authInfo, fmt.Errorf("authentication failed: %v", err)
 	}
 
-	c.AuthInfo = authInfo
-	return nil
+	return authInfo, nil
 }
 
-func (c *OAuthClient) authorize() (*authorizeCmdData, error) {
+func (c *OAuthClient) authorize(app OAuthApp) (*authorizeCmdData, error) {
 	authzCmd := &rpc.Payload{
 		Args: authorizeCmdArgs{
-			ClientId: c.ClientId,
+			ClientId: app.ClientId,
 			Scopes:   c.Scopes,
 		},
 		Cmd: "AUTHORIZE",
@@ -203,19 +281,23 @@ func (c *OAuthClient) authorize() (*authorizeCmdData, error) {
 		return nil, fmt.Errorf("expected AUTHORIZE cmd but got %s", payload.Cmd)
 	}
 
+	if err = payload.Error(); err != nil {
+		return nil, fmt.Errorf("got error payload: %v", err)
+	}
+
 	var payloadData authorizeCmdData
 	err = json.Unmarshal(*payload.RawData, &payloadData)
 	if err != nil {
-		return nil, fmt.Errorf("error unmarshalling payload data: %v", err)
+		return nil, err
 	}
 
 	return &payloadData, nil
 }
 
-func (c *OAuthClient) getToken(code string) (*OAuthInfo, error) {
+func (c *OAuthClient) getToken(app OAuthApp, code string) (*OAuthToken, error) {
 	tokenData := url.Values{}
-	tokenData.Set("client_id", c.ClientId)
-	tokenData.Set("client_secret", c.ClientSecret)
+	tokenData.Set("client_id", app.ClientId)
+	tokenData.Set("client_secret", app.ClientSecret)
 	tokenData.Set("grant_type", "authorization_code")
 	tokenData.Set("code", code)
 	tokenData.Set("redirect_uri", c.redirectURI())
@@ -246,7 +328,7 @@ func (c *OAuthClient) getToken(code string) (*OAuthInfo, error) {
 		return nil, err
 	}
 
-	var authInfo OAuthInfo
+	var authInfo OAuthToken
 	err = json.Unmarshal(tokenBody, &authInfo)
 	if err != nil {
 		return nil, err
@@ -276,13 +358,17 @@ func (c *OAuthClient) authenticate(token string) (*authenticateCmdData, error) {
 		return nil, fmt.Errorf("expected AUTHENTICATE cmd but got %s", payload.Cmd)
 	}
 
+	if err = payload.Error(); err != nil {
+		return nil, fmt.Errorf("got error payload: %v", err)
+	}
+
 	var payloadData authenticateCmdData
 	err = json.Unmarshal(*payload.RawData, &payloadData)
 	if err != nil {
-		return nil, fmt.Errorf("error unmarshalling payload data: %v", err)
+		return nil, err
 	}
 
-	return &payloadData, nil
+	return &payloadData, payload.Error()
 }
 
 // Send will send an rpc.Payload over the transport.
@@ -317,10 +403,9 @@ func (c *OAuthClient) Receive() (*rpc.Payload, error) {
 		return nil, err
 	}
 
-	payloadErr := payload.Error()
-	if payloadErr != nil {
-		return &payload, payloadErr
+	if err = payload.Error(); err != nil {
+		return &payload, err
 	}
 
-	return &payload, payloadErr
+	return &payload, nil
 }
