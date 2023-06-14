@@ -2,6 +2,14 @@
 
 package transport
 
+import (
+	"fmt"
+	"net"
+	"time"
+	"os"
+	"path/filepath"
+)
+
 const unixSocketBaseAddress = `discord-ipc`
 
 // getTempDir is a helper function for finding the appropriate temp directory on unix systems.
@@ -20,7 +28,7 @@ func getTempDir() string {
 func openSocket(number int, timeout time.Duration) (net.Conn, error) {
 	return net.DialTimeout(
 		"unix", 
-		filepath.Join(getTempDir(), fmt.Sprintf("%s-%s", unixSocketBaseAddress, number))
+		filepath.Join(getTempDir(), fmt.Sprintf("%s-%s", unixSocketBaseAddress, number)),
 		timeout,
 	)
 }
