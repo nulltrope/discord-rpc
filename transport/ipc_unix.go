@@ -28,7 +28,7 @@ func getTempDir() string {
 func openSocket(number int, timeout time.Duration) (net.Conn, error) {
 	return net.DialTimeout(
 		"unix", 
-		filepath.Join(getTempDir(), fmt.Sprintf("%s-%s", unixSocketBaseAddress, number)),
+		filepath.Join(getTempDir(), fmt.Sprintf("%s-%d", unixSocketBaseAddress, number)),
 		timeout,
 	)
 }
